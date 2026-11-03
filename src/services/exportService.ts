@@ -164,6 +164,17 @@ export const exportService = {
       };
       rootFolder.file('export-summary.json', JSON.stringify(summary, null, 2));
 
+      // Collect failed chats from this batch
+      const failedChats = batch.filter(c => c.status === 'failed');
+      for (const fc of failedChats) {
+        failedExports.push({
+          chat_id: fc.chatId,
+          name: fc.name,
+          error: fc.lastError || 'Extraction incomplete or inaccessible',
+          timestamp: fc.updatedAt || new Date().toISOString(),
+        });
+      }
+
       // Root failed-exports.json
       rootFolder.file('failed-exports.json', JSON.stringify(failedExports, null, 2));
 

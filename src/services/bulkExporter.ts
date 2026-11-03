@@ -215,7 +215,11 @@ class BulkExportEngine {
         chrome.runtime.sendMessage(
           {
             action: 'EXTRACT_CHAT_REQUEST',
-            payload: { chatId: chat.chatId, contactName: chat.name },
+            payload: {
+              chatId: chat.chatId,
+              contactName: chat.name,
+              phoneNumber: chat.phoneNumber,
+            },
             timestamp: Date.now(),
           },
           (response) => {
