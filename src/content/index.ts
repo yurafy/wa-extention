@@ -10,7 +10,8 @@ import {
   resolveOpenChatPhoneNumber, 
   extractMessagesFromOpenChat,
   abortActiveExtraction,
-  resetActiveExtraction
+  resetActiveExtraction,
+  clearSearchBarIfActive
 } from './chatExtractor';
 
 console.log('[WA Exporter] Content script loaded on WhatsApp Web');
@@ -81,10 +82,13 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendRe
 
       sendResponse({ success: true, message: 'Chat discovery started' });
 
-      // Run chat list virtualized scroll discovery
-      discoverAllChats((chats, totalSoFar, done) => {
-        reportDiscoveredChats(chats, totalSoFar, done);
-      });
+      // Run chat list virtualized scroll discovery after clearing any search bar filter
+      (async () => {
+        await clearSearchBarIfActive();
+        discoverAllChats((chats, totalSoFar, done) => {
+          reportDiscoveredChats(chats, totalSoFar, done);
+        });
+      })();
       break;
     }
 
@@ -105,10 +109,10 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendRe
       // Direct DOM extraction
       (async () => {
         try {
-          const { contactName, phoneNumber } = (payload as any) || {};
+          const { contactName, phoneNumber, chatId } = (payload as any) || {};
 
           // 1. Open the conversation in WhatsApp Web DOM
-          const opened = await openConversationInDOM(contactName, phoneNumber);
+          const opened = await openConversationInDOM(contactName, phoneNumber, chatId);
           if (!opened) {
             sendResponse({
               success: false,

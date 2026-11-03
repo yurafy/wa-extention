@@ -69,7 +69,7 @@ class BulkExportEngine {
       }
 
       while (this.isPaused()) {
-        await new Promise(r => setTimeout(r, 500));
+        await new Promise(r => setTimeout(r, 100));
         if (this.isStopped()) {
           this.state = 'stopped';
           this.currentChatIndex = 0;
@@ -81,10 +81,18 @@ class BulkExportEngine {
       this.currentChatIndex = i;
       const chat = this.targetChats[i];
       await this.extractSingleChat(chat);
+
+      if (this.isStopped()) {
+        this.state = 'stopped';
+        this.currentChatIndex = 0;
+        this.notifyProgress();
+        return;
+      }
+
       this.notifyProgress();
 
-      // Gentle throttle between chats (500ms)
-      await new Promise(r => setTimeout(r, 500));
+      // Gentle throttle between chats (250ms)
+      await new Promise(r => setTimeout(r, 250));
     }
 
     this.state = 'idle';

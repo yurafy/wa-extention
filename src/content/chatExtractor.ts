@@ -3,6 +3,13 @@
  * Directly controls WhatsApp Web DOM without relying on external bridges or postMessage.
  */
 
+import {
+  getChatListContainer,
+  getScrollableElement,
+  parseChatRow,
+  getAllVisibleRowElements,
+} from './chatDiscovery';
+
 let isExtractionAborted = false;
 
 export function abortActiveExtraction(): void {
@@ -17,58 +24,77 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function clickElement(el: Element): void {
-  const target = (el.querySelector('div[role="gridcell"], div[role="button"]') || el) as HTMLElement;
+function clickChatRow(el: HTMLElement): void {
+  const target = (el.querySelector<HTMLElement>('div[role="gridcell"], div[role="button"], div[tabindex="-1"]') || el);
+  try {
+    target.scrollIntoView({ block: 'nearest' });
+  } catch {}
   const rect = target.getBoundingClientRect();
-  const clientX = rect.left + Math.max(10, rect.width / 2);
-  const clientY = rect.top + Math.max(10, rect.height / 2);
+  const clientX = (rect.width > 0) ? rect.left + rect.width / 2 : 100;
+  const clientY = (rect.height > 0) ? rect.top + rect.height / 2 : 100;
   const opts = { bubbles: true, cancelable: true, view: window, clientX, clientY };
   target.dispatchEvent(new PointerEvent('pointerdown', opts));
   target.dispatchEvent(new MouseEvent('mousedown', opts));
   target.dispatchEvent(new PointerEvent('pointerup', opts));
   target.dispatchEvent(new MouseEvent('mouseup', opts));
+  target.dispatchEvent(new MouseEvent('click', opts));
   target.click();
 }
 
 /**
- * Resets and clears the search bar if any stuck text exists.
+ * Resets and clears the search bar if any stuck text exists, restoring the full chat list.
+ * Language-agnostic (English, French, Arabic, etc.)
  */
 export async function clearSearchBarIfActive(): Promise<void> {
   try {
-    const clearSelectors = [
-      'button[aria-label="Back"]',
-      'button[aria-label="Cancel search"]',
-      'button[aria-label="Clear text"]',
-      '[data-testid="x-alt"]',
-      '[data-testid="search-back-btn"]',
-      'span[data-testid="x-alt"]',
-      'span[data-icon="x-alt"]'
-    ];
-    for (const sel of clearSelectors) {
-      const btn = document.querySelector<HTMLElement>(sel);
-      if (btn) {
-        clickElement(btn);
-        await sleep(150);
-      }
+    // 1. Click search exit/back button
+    const backBtn = document.querySelector<HTMLElement>(
+      '[data-icon="back"], [data-icon="arrow-left"], [data-testid="search-back-btn"], button[aria-label="Back"], button[aria-label="Retour"], button[aria-label="رجوع"]'
+    );
+    if (backBtn) {
+      const clickable = backBtn.closest('button') || backBtn;
+      clickable.click();
+      await sleep(100);
     }
 
+    // 2. Click clear text / x button
+    const clearBtn = document.querySelector<HTMLElement>(
+      '[data-icon="x-alt"], [data-icon="x"], [data-testid="x-alt"], button[aria-label="Cancel search"], button[aria-label="Clear text"], button[aria-label="Effacer le texte"]'
+    );
+    if (clearBtn) {
+      const clickable = clearBtn.closest('button') || clearBtn;
+      clickable.click();
+      await sleep(100);
+    }
+
+    // 3. Clear any contenteditable or input text inside #side
     const searchInputs = document.querySelectorAll<HTMLElement>(
-      '#side div[contenteditable="true"], [data-testid="chat-list-search"], #side [role="textbox"], div[data-tab="3"], input[type="text"]'
+      '#side div[contenteditable="true"], [data-testid="chat-list-search"], #side [role="textbox"], #side input[type="text"]'
     );
     for (const input of Array.from(searchInputs)) {
-      if (input.textContent || (input as HTMLInputElement).value) {
+      const hasText = input.textContent?.trim() || (input as HTMLInputElement).value?.trim();
+      if (hasText) {
         input.focus();
-        document.execCommand('selectAll', false);
-        document.execCommand('delete', false);
+        try {
+          const sel = window.getSelection();
+          const range = document.createRange();
+          range.selectNodeContents(input);
+          sel?.removeAllRanges();
+          sel?.addRange(range);
+          document.execCommand('delete', false);
+        } catch {}
         input.textContent = '';
-        if ((input as HTMLInputElement).value) (input as HTMLInputElement).value = '';
-        input.dispatchEvent(new InputEvent('input', { bubbles: true }));
+        if ((input as HTMLInputElement).value !== undefined) {
+          (input as HTMLInputElement).value = '';
+        }
+        input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward' }));
       }
     }
 
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
-    document.dispatchEvent(new KeyboardEvent('keyup', { key: 'Escape', code: 'Escape', bubbles: true }));
-    await sleep(200);
+    // 4. Send Escape key to dismiss any active search filter
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
+    document.dispatchEvent(new KeyboardEvent('keyup', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
+    await sleep(150);
   } catch {}
 }
 
@@ -78,147 +104,195 @@ export async function clearSearchBarIfActive(): Promise<void> {
  */
 export async function openConversationInDOM(
   contactName: string,
-  phoneNumber?: string
+  phoneNumber?: string,
+  chatId?: string
 ): Promise<boolean> {
-  // Ensure search bar is cleared so the full chat list is visible
+  if (isExtractionAborted) return false;
+
+  // 1. Ensure search bar is cleared so the full chat list is rendered
   await clearSearchBarIfActive();
-
-  // 1. Is it already open in #main?
-  const currentTitle = document.querySelector(
-    '#main header [data-testid="conversation-info-header-chat-title"], #main header span[dir="auto"]'
-  );
-  if (currentTitle && contactName) {
-    const text = currentTitle.textContent?.trim().toLowerCase() || '';
-    if (text.includes(contactName.trim().toLowerCase())) {
-      return true;
-    }
-  }
-
-  const container = document.getElementById('pane-side') 
-    || document.querySelector('[data-testid="chat-list"]')
-    || document.querySelector('[aria-label="Chat list"]');
-
-  if (!container) return false;
-
-  // Find scrollable container
-  let scrollEl: HTMLElement = container;
-  if (container.scrollHeight <= container.clientHeight) {
-    const child = container.querySelector('[role="list"]') as HTMLElement;
-    if (child && child.scrollHeight > child.clientHeight) {
-      scrollEl = child;
-    }
-  }
 
   const targetClean = contactName.trim().toLowerCase();
   const phoneClean = phoneNumber ? phoneNumber.replace(/\D/g, '') : '';
 
-  // Helper to test if a row matches the contact
-  function doesRowMatch(row: Element): boolean {
-    const titleSpan = row.querySelector('[data-testid="cell-frame-title"] span[dir="auto"], span[title]');
-    const nameText = titleSpan?.textContent?.trim().toLowerCase() || '';
-    const fullText = row.textContent?.toLowerCase() || '';
+  // 2. Is this conversation already open in #main?
+  const currentTitle = document.querySelector(
+    '#main header [data-testid="conversation-info-header-chat-title"], #main header span[dir="auto"], #main header span[title]'
+  );
+  if (currentTitle && contactName) {
+    const text = currentTitle.textContent?.trim().toLowerCase() || currentTitle.getAttribute('title')?.toLowerCase() || '';
+    if (text === targetClean || text.includes(targetClean) || targetClean.includes(text)) {
+      return true;
+    }
+    if (phoneClean && phoneClean.length >= 7 && text.replace(/\D/g, '').includes(phoneClean)) {
+      return true;
+    }
+  }
 
-    if (nameText && (nameText === targetClean || nameText.includes(targetClean) || targetClean.includes(nameText))) {
+  // 3. Locate chat list container and scrollable element
+  const container = getChatListContainer();
+  if (!container) return false;
+  const scrollEl = getScrollableElement(container);
+
+  // Helper function to test if a row matches the target chat
+  function doesRowMatch(row: HTMLElement): boolean {
+    const parsed = parseChatRow(row);
+    if (parsed) {
+      if (chatId && parsed.chatId === chatId) return true;
+      const parsedName = parsed.name.trim().toLowerCase();
+      if (parsedName && (parsedName === targetClean || parsedName.includes(targetClean) || targetClean.includes(parsedName))) {
+        return true;
+      }
+      if (phoneClean && phoneClean.length >= 7 && parsed.phoneNumber) {
+        const parsedDigits = parsed.phoneNumber.replace(/\D/g, '');
+        if (parsedDigits.includes(phoneClean) || phoneClean.includes(parsedDigits)) {
+          return true;
+        }
+      }
+    }
+
+    const fullText = (row.textContent || '').toLowerCase();
+    if (targetClean.length >= 3 && fullText.includes(targetClean)) {
       return true;
     }
-    if (fullText.includes(targetClean)) {
-      return true;
-    }
-    if (phoneClean && fullText.includes(phoneClean)) {
+    if (phoneClean && phoneClean.length >= 7 && fullText.replace(/\D/g, '').includes(phoneClean)) {
       return true;
     }
     return false;
   }
 
-  // 2. Check currently visible rows first (no scrolling needed if already visible)
-  const initialRows = document.querySelectorAll(
-    '#pane-side [data-testid="cell-frame-container"], #pane-side div[role="listitem"]'
-  );
-
-  for (const row of Array.from(initialRows)) {
+  // 4. Check visible rows first
+  const initialRows = getAllVisibleRowElements();
+  for (const row of initialRows) {
     if (doesRowMatch(row)) {
-      clickElement(row);
-      await sleep(1000);
-      return true;
+      clickChatRow(row);
+      const opened = await waitForMainChatOpen(contactName, phoneNumber);
+      if (opened) return true;
     }
   }
 
-  // 3. Scroll down through #pane-side to locate the chat
+  // 5. Scroll through #pane-side from the top
   scrollEl.scrollTop = 0;
-  await sleep(200);
+  await sleep(150);
 
   let prevScroll = -1;
-  const maxRounds = 50;
+  const maxRounds = 45;
 
   for (let r = 0; r < maxRounds; r++) {
     if (isExtractionAborted) return false;
 
-    const rows = document.querySelectorAll(
-      '#pane-side [data-testid="cell-frame-container"], #pane-side div[role="listitem"]'
-    );
-
-    for (const row of Array.from(rows)) {
+    const rows = getAllVisibleRowElements();
+    for (const row of rows) {
       if (doesRowMatch(row)) {
-        clickElement(row);
-        await sleep(1000);
-        return true;
+        clickChatRow(row);
+        const opened = await waitForMainChatOpen(contactName, phoneNumber);
+        if (opened) return true;
       }
     }
 
-    if (scrollEl.scrollTop === prevScroll) {
+    if (scrollEl.scrollTop === prevScroll || (scrollEl.scrollTop + scrollEl.clientHeight >= scrollEl.scrollHeight - 20)) {
       break; // Reached bottom of list
     }
 
     prevScroll = scrollEl.scrollTop;
-    scrollEl.scrollTop += 550;
-    await sleep(250);
+    scrollEl.scrollTop += 500;
+    await sleep(200);
   }
 
   return false;
+}
+
+async function waitForMainChatOpen(contactName?: string, phoneNumber?: string): Promise<boolean> {
+  const targetClean = contactName?.trim().toLowerCase();
+  const phoneClean = phoneNumber ? phoneNumber.replace(/\D/g, '') : '';
+
+  for (let i = 0; i < 15; i++) {
+    if (isExtractionAborted) return false;
+
+    const titleEl = document.querySelector(
+      '#main header [data-testid="conversation-info-header-chat-title"], #main header span[dir="auto"], #main header span[title]'
+    );
+    if (titleEl) {
+      const text = titleEl.textContent?.trim().toLowerCase() || titleEl.getAttribute('title')?.toLowerCase() || '';
+      if (targetClean && (text === targetClean || text.includes(targetClean) || targetClean.includes(text))) {
+        await sleep(250);
+        return true;
+      }
+      if (phoneClean && phoneClean.length >= 7 && text.replace(/\D/g, '').includes(phoneClean)) {
+        await sleep(250);
+        return true;
+      }
+      // If header is loaded and no title to compare with, accept it
+      if (!targetClean) {
+        await sleep(250);
+        return true;
+      }
+    }
+    await sleep(150);
+  }
+
+  return Boolean(document.querySelector('#main header'));
 }
 
 /**
  * Extracts phone number for the open conversation from the header avatar or contact drawer.
  */
 export async function resolveOpenChatPhoneNumber(contactName?: string): Promise<string | undefined> {
-  // 1. Check header avatar URL (often contains u=PHONE%40c.us)
-  const headerImg = document.querySelector('#main header img');
+  // 1. If contactName already has a clean phone number format
+  if (contactName && /^\+?[\d\s\-()]{8,22}$/.test(contactName.trim())) {
+    const digits = contactName.replace(/\D/g, '');
+    if (digits.length >= 7) return `+${digits}`;
+  }
+
+  // 2. Check header avatar URL (often contains u=PHONE%40c.us)
+  const headerImg = document.querySelector<HTMLImageElement>('#main header img');
   if (headerImg) {
-    const src = headerImg.getAttribute('src') || '';
+    const src = headerImg.src || headerImg.getAttribute('src') || '';
     const match = src.match(/u=(\d{7,15})%40/i) || src.match(/(\d{7,15})@c\.us/i);
     if (match) return `+${match[1]}`;
   }
 
-  // 2. If contact name itself looks like a phone number
-  if (contactName && /^\+?[\d\s\-()]{7,20}$/.test(contactName)) {
-    const cleanDigits = contactName.replace(/\D/g, '');
-    if (cleanDigits.length >= 7) return `+${cleanDigits}`;
+  // 3. Check header subtitle text
+  const headerSubtitle = document.querySelector(
+    '#main header [data-testid="conversation-info-header-chat-subtitle"], #main header span[dir="auto"]'
+  );
+  if (headerSubtitle) {
+    const subText = headerSubtitle.textContent?.trim() || '';
+    const match = subText.match(/\+?\d[\d\s\-()]{7,18}\d/);
+    if (match) {
+      const digits = match[0].replace(/\D/g, '');
+      if (digits.length >= 8 && digits.length <= 15) return `+${digits}`;
+    }
   }
 
-  // 3. Click header to open the Contact Info Drawer and read the phone number directly
-  const header = document.querySelector('#main header');
+  // 4. Click header to open the Contact Info Drawer and read the phone number directly
   const headerClickTarget = document.querySelector<HTMLElement>(
     '#main header [data-testid="conversation-info-header-chat-title"], #main header div[role="button"]'
-  ) || header as HTMLElement;
+  ) || document.querySelector<HTMLElement>('#main header');
 
   if (headerClickTarget) {
     try {
-      clickElement(headerClickTarget);
-      await sleep(600); // Wait for drawer to slide open
+      headerClickTarget.click();
+      await sleep(500); // Wait for drawer to slide open
 
       const drawer = document.querySelector(
-        '[data-testid="contact-info-drawer"], section[tabindex="-1"], div[aria-label="Contact details"]'
-      );
+        '[data-testid="contact-info-drawer"], [data-testid="drawer-right"], section[tabindex="-1"], div[aria-label*="Contact"], div[aria-label*="Infos"]'
+      ) || document.querySelector('#app div[tabindex="-1"]');
 
       let foundPhone: string | undefined;
       if (drawer) {
-        const textNodes = drawer.querySelectorAll('span, div');
+        const textNodes = drawer.querySelectorAll('span, div, p');
         for (const node of Array.from(textNodes)) {
           const text = node.textContent?.trim() || '';
-          if (/^~?\+[\d\s\-()]{8,22}$/.test(text)) {
-            const digits = text.replace(/\D/g, '');
-            if (digits.length >= 7 && digits.length <= 15) {
-              foundPhone = `+${digits}`;
+          const match = text.match(/\+?\d[\d\s\-()]{7,18}\d/);
+          if (match) {
+            const digits = match[0].replace(/\D/g, '');
+            if (digits.length >= 8 && digits.length <= 15) {
+              if (digits.startsWith('0') && digits.length === 10) {
+                foundPhone = `+212${digits.substring(1)}`;
+              } else {
+                foundPhone = match[0].startsWith('+') ? `+${digits}` : `+${digits}`;
+              }
               break;
             }
           }
@@ -226,27 +300,25 @@ export async function resolveOpenChatPhoneNumber(contactName?: string): Promise<
 
         // Close drawer
         const closeBtn = drawer.querySelector<HTMLElement>(
-          '[data-testid="x"], [data-testid="btn-closer"], [aria-label="Close"], button[aria-label="Back"]'
+          '[data-icon="x"], [data-testid="x"], [data-testid="btn-closer"], button[aria-label="Close"], button[aria-label="Fermer"]'
         );
         if (closeBtn) {
-          clickElement(closeBtn);
+          closeBtn.click();
         } else {
           document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
         }
-        await sleep(300);
+        await sleep(250);
 
         if (foundPhone) return foundPhone;
       }
-    } catch {
-      // Fallback
-    }
+    } catch {}
   }
 
   return undefined;
 }
 
 /**
- * Extracts all accessible messages and media from the currently open chat in #main.
+ * Extracts all messages and media elements currently in the active conversation view.
  */
 export async function extractMessagesFromOpenChat(): Promise<{
   messages: any[];
@@ -263,11 +335,11 @@ export async function extractMessagesFromOpenChat(): Promise<{
   );
 
   if (msgPanel) {
-    for (let r = 0; r < 8; r++) {
+    for (let r = 0; r < 5; r++) {
       if (isExtractionAborted) break;
       const prevHeight = msgPanel.scrollHeight;
       msgPanel.scrollTop = 0;
-      await sleep(400);
+      await sleep(300);
       if (msgPanel.scrollHeight === prevHeight) {
         break; // No earlier messages loaded
       }
@@ -366,7 +438,7 @@ export async function extractMessagesFromOpenChat(): Promise<{
       // If media exists, download it directly to base64
       if (mediaBlobUrl) {
         try {
-          const base64 = await fetchBlobAsBase64(mediaBlobUrl);
+          const base64 = await blobUrlToBase64(mediaBlobUrl);
           if (base64) {
             mediaFiles.push({
               fileName: mediaFileName || `media_${Date.now()}.bin`,
@@ -375,9 +447,7 @@ export async function extractMessagesFromOpenChat(): Promise<{
               dataBase64: base64,
             });
           }
-        } catch {
-          // Media download non-critical
-        }
+        } catch {}
       }
 
       if (text || mediaFileName) {
@@ -398,9 +468,9 @@ export async function extractMessagesFromOpenChat(): Promise<{
 }
 
 /**
- * Fetches a blob: or https: URL directly in the page context and converts to Base64
+ * Downloads a blob URL or media URL to base64 within the page context.
  */
-async function fetchBlobAsBase64(url: string): Promise<string | null> {
+async function blobUrlToBase64(url: string): Promise<string | null> {
   try {
     const res = await fetch(url);
     if (!res.ok) return null;
@@ -408,8 +478,8 @@ async function fetchBlobAsBase64(url: string): Promise<string | null> {
     return new Promise((resolve) => {
       const reader = new FileReader();
       reader.onloadend = () => {
-        const result = reader.result as string;
-        resolve(result);
+        const base64 = reader.result as string;
+        resolve(base64);
       };
       reader.onerror = () => resolve(null);
       reader.readAsDataURL(blob);

@@ -138,8 +138,12 @@ export const ChatTable: React.FC<ChatTableProps> = ({
               chats.map((chat) => (
                 <tr 
                   key={chat.chatId}
-                  className={`hover:bg-slate-800/40 transition-colors ${
-                    chat.isSelected ? 'bg-emerald-950/10' : ''
+                  onClick={(e) => {
+                    if ((e.target as HTMLElement).closest('button, a, input[type="checkbox"]')) return;
+                    onToggleSelect(chat.chatId);
+                  }}
+                  className={`hover:bg-slate-800/40 transition-colors cursor-pointer select-none ${
+                    chat.isSelected ? 'bg-emerald-950/20' : ''
                   }`}
                 >
                   {/* Select Checkbox */}

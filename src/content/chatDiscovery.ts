@@ -31,7 +31,7 @@ let shouldStopDiscovery = false;
 /**
  * Attempts to find the scrollable chat list container in WhatsApp Web.
  */
-function getChatListContainer(): HTMLElement | null {
+export function getChatListContainer(): HTMLElement | null {
   // Try multiple known selectors (WhatsApp Web updates its DOM periodically)
   const selectors = [
     '#pane-side',
@@ -50,7 +50,7 @@ function getChatListContainer(): HTMLElement | null {
  * Finds the scrollable element inside the chat list pane.
  * WhatsApp Web typically has a nested scrollable div inside #pane-side.
  */
-function getScrollableElement(container: HTMLElement): HTMLElement {
+export function getScrollableElement(container: HTMLElement): HTMLElement {
   // The actual scrollable element is usually a child div with overflow
   const scrollable = container.querySelector<HTMLElement>('[role="list"]') 
     || container.querySelector<HTMLElement>('[tabindex="0"]')
@@ -75,7 +75,7 @@ function getScrollableElement(container: HTMLElement): HTMLElement {
 /**
  * Extracts chat data from a single chat row DOM element.
  */
-function parseChatRow(row: HTMLElement): DiscoveredChat | null {
+export function parseChatRow(row: HTMLElement): DiscoveredChat | null {
   try {
     // --- Extract the chat name ---
     // WhatsApp Web uses spans with dir="auto" for chat titles
@@ -293,12 +293,9 @@ function parseRelativeTime(timeText: string): string {
 }
 
 /**
- * Scans all currently visible chat rows in the DOM.
+ * Returns all currently rendered chat row elements in WhatsApp Web DOM.
  */
-function scanVisibleChats(): DiscoveredChat[] {
-  const results: DiscoveredChat[] = [];
-
-  // Try various selectors for chat row containers
+export function getAllVisibleRowElements(): HTMLElement[] {
   const rowSelectors = [
     '[data-testid="cell-frame-container"]',
     '[data-testid="list-item-chat"]',
@@ -307,26 +304,30 @@ function scanVisibleChats(): DiscoveredChat[] {
     '#pane-side > div > div > div > div > div',
   ];
 
-  let rows: HTMLElement[] = [];
   for (const sel of rowSelectors) {
     const found = document.querySelectorAll<HTMLElement>(sel);
     if (found.length > 0) {
-      rows = Array.from(found);
-      break;
+      return Array.from(found);
     }
   }
 
-  // If no specific selectors worked, try a broader approach
-  if (rows.length === 0) {
-    const pane = getChatListContainer();
-    if (pane) {
-      // Look for clickable chat containers that have chat-like content
-      const candidates = pane.querySelectorAll<HTMLElement>('div[tabindex="-1"]');
-      if (candidates.length > 0) {
-        rows = Array.from(candidates);
-      }
+  const pane = getChatListContainer();
+  if (pane) {
+    const candidates = pane.querySelectorAll<HTMLElement>('div[tabindex="-1"]');
+    if (candidates.length > 0) {
+      return Array.from(candidates);
     }
   }
+
+  return [];
+}
+
+/**
+ * Scans all currently visible chat rows in the DOM.
+ */
+function scanVisibleChats(): DiscoveredChat[] {
+  const results: DiscoveredChat[] = [];
+  const rows = getAllVisibleRowElements();
 
   for (const row of rows) {
     const chat = parseChatRow(row);
