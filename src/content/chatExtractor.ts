@@ -8,13 +8,58 @@ function sleep(ms: number): Promise<void> {
 }
 
 function clickElement(el: Element): void {
-  const target = el.querySelector('[role="button"]') || el;
-  const opts = { bubbles: true, cancelable: true, view: window };
+  const target = (el.querySelector('div[role="gridcell"], div[role="button"]') || el) as HTMLElement;
+  const rect = target.getBoundingClientRect();
+  const clientX = rect.left + Math.max(10, rect.width / 2);
+  const clientY = rect.top + Math.max(10, rect.height / 2);
+  const opts = { bubbles: true, cancelable: true, view: window, clientX, clientY };
   target.dispatchEvent(new PointerEvent('pointerdown', opts));
   target.dispatchEvent(new MouseEvent('mousedown', opts));
   target.dispatchEvent(new PointerEvent('pointerup', opts));
   target.dispatchEvent(new MouseEvent('mouseup', opts));
-  (target as HTMLElement).click();
+  target.click();
+}
+
+/**
+ * Resets and clears the search bar if any stuck text exists.
+ */
+export async function clearSearchBarIfActive(): Promise<void> {
+  try {
+    const clearSelectors = [
+      'button[aria-label="Back"]',
+      'button[aria-label="Cancel search"]',
+      'button[aria-label="Clear text"]',
+      '[data-testid="x-alt"]',
+      '[data-testid="search-back-btn"]',
+      'span[data-testid="x-alt"]',
+      'span[data-icon="x-alt"]'
+    ];
+    for (const sel of clearSelectors) {
+      const btn = document.querySelector<HTMLElement>(sel);
+      if (btn) {
+        clickElement(btn);
+        await sleep(150);
+      }
+    }
+
+    const searchInputs = document.querySelectorAll<HTMLElement>(
+      '#side div[contenteditable="true"], [data-testid="chat-list-search"], #side [role="textbox"], div[data-tab="3"], input[type="text"]'
+    );
+    for (const input of Array.from(searchInputs)) {
+      if (input.textContent || (input as HTMLInputElement).value) {
+        input.focus();
+        document.execCommand('selectAll', false);
+        document.execCommand('delete', false);
+        input.textContent = '';
+        if ((input as HTMLInputElement).value) (input as HTMLInputElement).value = '';
+        input.dispatchEvent(new InputEvent('input', { bubbles: true }));
+      }
+    }
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+    document.dispatchEvent(new KeyboardEvent('keyup', { key: 'Escape', code: 'Escape', bubbles: true }));
+    await sleep(200);
+  } catch {}
 }
 
 /**
@@ -25,6 +70,9 @@ export async function openConversationInDOM(
   contactName: string,
   phoneNumber?: string
 ): Promise<boolean> {
+  // Ensure search bar is cleared so the full chat list is visible
+  await clearSearchBarIfActive();
+
   // 1. Is it already open in #main?
   const currentTitle = document.querySelector(
     '#main header [data-testid="conversation-info-header-chat-title"], #main header span[dir="auto"]'
@@ -42,7 +90,7 @@ export async function openConversationInDOM(
 
   if (!container) return false;
 
-  // Find the scrollable container
+  // Find scrollable container
   let scrollEl: HTMLElement = container;
   if (container.scrollHeight <= container.clientHeight) {
     const child = container.querySelector('[role="list"]') as HTMLElement;
@@ -51,17 +99,34 @@ export async function openConversationInDOM(
     }
   }
 
-  // 2. Check currently visible rows first (no scrolling needed if already visible)
   const targetClean = contactName.trim().toLowerCase();
   const phoneClean = phoneNumber ? phoneNumber.replace(/\D/g, '') : '';
 
+  // Helper to test if a row matches the contact
+  function doesRowMatch(row: Element): boolean {
+    const titleSpan = row.querySelector('[data-testid="cell-frame-title"] span[dir="auto"], span[title]');
+    const nameText = titleSpan?.textContent?.trim().toLowerCase() || '';
+    const fullText = row.textContent?.toLowerCase() || '';
+
+    if (nameText && (nameText === targetClean || nameText.includes(targetClean) || targetClean.includes(nameText))) {
+      return true;
+    }
+    if (fullText.includes(targetClean)) {
+      return true;
+    }
+    if (phoneClean && fullText.includes(phoneClean)) {
+      return true;
+    }
+    return false;
+  }
+
+  // 2. Check currently visible rows first (no scrolling needed if already visible)
   const initialRows = document.querySelectorAll(
     '#pane-side [data-testid="cell-frame-container"], #pane-side div[role="listitem"]'
   );
 
   for (const row of Array.from(initialRows)) {
-    const text = row.textContent?.toLowerCase() || '';
-    if (text.includes(targetClean) || (phoneClean && text.includes(phoneClean))) {
+    if (doesRowMatch(row)) {
       clickElement(row);
       await sleep(1000);
       return true;
@@ -73,7 +138,7 @@ export async function openConversationInDOM(
   await sleep(200);
 
   let prevScroll = -1;
-  const maxRounds = 40; // Max 40 scroll steps to avoid infinite loops
+  const maxRounds = 50;
 
   for (let r = 0; r < maxRounds; r++) {
     const rows = document.querySelectorAll(
@@ -81,8 +146,7 @@ export async function openConversationInDOM(
     );
 
     for (const row of Array.from(rows)) {
-      const text = row.textContent?.toLowerCase() || '';
-      if (text.includes(targetClean) || (phoneClean && text.includes(phoneClean))) {
+      if (doesRowMatch(row)) {
         clickElement(row);
         await sleep(1000);
         return true;
@@ -90,12 +154,11 @@ export async function openConversationInDOM(
     }
 
     if (scrollEl.scrollTop === prevScroll) {
-      // Reached bottom
-      break;
+      break; // Reached bottom of list
     }
 
     prevScroll = scrollEl.scrollTop;
-    scrollEl.scrollTop += 600;
+    scrollEl.scrollTop += 550;
     await sleep(250);
   }
 

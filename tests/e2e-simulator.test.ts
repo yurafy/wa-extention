@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { db } from '../src/storage/db';
 import { chatRepository } from '../src/storage/chatRepository';
 import { messageRepository } from '../src/storage/messageRepository';
