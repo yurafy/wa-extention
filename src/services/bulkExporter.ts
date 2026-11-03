@@ -12,6 +12,18 @@ import { ChatContact, MessageRecord, MediaBlobRecord } from '../types';
 
 export type ProcessState = 'idle' | 'running' | 'paused' | 'stopped';
 
+function base64ToBlob(base64Data: string, mimeType: string): Blob {
+  const parts = base64Data.split(',');
+  const rawBase64 = parts.length > 1 ? parts[1] : parts[0];
+  const binaryString = atob(rawBase64);
+  const len = binaryString.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  return new Blob([bytes], { type: mimeType });
+}
+
 class BulkExportEngine {
   private state: ProcessState = 'idle';
   private shouldStop = false;
@@ -71,8 +83,8 @@ class BulkExportEngine {
       await this.extractSingleChat(chat);
       this.notifyProgress();
 
-      // Gentle throttle between chats (800ms)
-      await new Promise(r => setTimeout(r, 800));
+      // Gentle throttle between chats (500ms)
+      await new Promise(r => setTimeout(r, 500));
     }
 
     this.state = 'idle';
@@ -94,9 +106,9 @@ class BulkExportEngine {
   async extractSingleChat(chat: ChatContact): Promise<void> {
     try {
       await chatRepository.updateChatStatus(chat.chatId, 'extracting_messages');
-      await logRepository.addLog('info', `Opening chat "${chat.name}"...`, chat.chatId);
+      await logRepository.addLog('info', `Extracting messages for "${chat.name}"...`, chat.chatId);
 
-      // Send extraction request to WhatsApp Web tab
+      // Send extraction request to WhatsApp Web content script
       const response = await this.sendExtractionRequestToWhatsApp(chat);
 
       if (!response || !response.success) {
@@ -104,10 +116,11 @@ class BulkExportEngine {
       }
 
       const rawMessages = response.messages || [];
+      const mediaFiles = response.mediaFiles || [];
       const resolvedPhone = response.resolvedPhone;
 
-      // Update phone number if it was just resolved from the chat view
-      if (resolvedPhone && !chat.phoneNumber) {
+      // Update phone number if resolved
+      if (resolvedPhone) {
         chat.phoneNumber = resolvedPhone;
         await chatRepository.upsertChat(chat);
       }
@@ -116,42 +129,40 @@ class BulkExportEngine {
       const formattedMessages: MessageRecord[] = rawMessages.map((m: any) => ({
         id: m.id,
         chatId: chat.chatId,
-        timestamp: m.timestamp,
-        sender: m.sender,
-        type: m.type,
-        text: m.text,
-        mediaPath: m.mediaFileName ? `media/${m.type}s/${m.mediaFileName}` : null,
+        timestamp: m.timestamp || new Date().toISOString(),
+        sender: m.sender || 'customer',
+        type: m.type || 'text',
+        text: m.text || '',
+        mediaPath: m.mediaPath || null,
         deliveryStatus: m.deliveryStatus,
         createdAt: new Date().toISOString(),
       }));
 
-      // Store messages
-      await messageRepository.saveMessages(formattedMessages);
+      // Store messages in IndexedDB
+      if (formattedMessages.length > 0) {
+        await messageRepository.saveMessages(formattedMessages);
+      }
 
-      // Extract and save media blobs
+      // Store media files in IndexedDB
       let savedMediaCount = 0;
-      for (const m of rawMessages) {
-        if (m.mediaBlobUrl) {
-          try {
-            const blob = await this.fetchBlob(m.mediaBlobUrl);
-            if (blob) {
-              const mediaRecord: MediaBlobRecord = {
-                id: `media_${m.id}`,
-                messageId: m.id,
-                chatId: chat.chatId,
-                category: m.type === 'image' ? 'images' : m.type === 'video' ? 'videos' : m.type === 'audio' ? 'audio' : 'documents',
-                fileName: m.mediaFileName || `media_${Date.now()}.bin`,
-                mimeType: m.mediaMimeType || blob.type || 'application/octet-stream',
-                sizeBytes: blob.size,
-                data: blob,
-                downloadedAt: new Date().toISOString(),
-              };
-              await messageRepository.saveMedia(mediaRecord);
-              savedMediaCount++;
-            }
-          } catch {
-            // Ignore single media download failure
-          }
+      for (const mf of mediaFiles) {
+        try {
+          const blob = base64ToBlob(mf.dataBase64, mf.mimeType);
+          const mediaRecord: MediaBlobRecord = {
+            id: `media_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+            messageId: chat.chatId,
+            chatId: chat.chatId,
+            category: mf.category || 'images',
+            fileName: mf.fileName,
+            mimeType: mf.mimeType,
+            sizeBytes: blob.size,
+            data: blob,
+            downloadedAt: new Date().toISOString(),
+          };
+          await messageRepository.saveMedia(mediaRecord);
+          savedMediaCount++;
+        } catch {
+          // Ignore individual media save failure
         }
       }
 
@@ -199,16 +210,6 @@ class BulkExportEngine {
     }
   }
 
-  private async fetchBlob(url: string): Promise<Blob | null> {
-    try {
-      const res = await fetch(url);
-      if (res.ok) return await res.blob();
-    } catch {
-      // Fallback
-    }
-    return null;
-  }
-
   private sendExtractionRequestToWhatsApp(chat: ChatContact): Promise<any> {
     return new Promise((resolve) => {
       if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
@@ -240,6 +241,7 @@ class BulkExportEngine {
                 text: 'Sample extracted conversation message',
               }
             ],
+            mediaFiles: [],
           });
         }, 500);
       }
