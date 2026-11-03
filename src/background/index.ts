@@ -1,13 +1,12 @@
 /**
  * Chrome Extension Manifest V3 Background Service Worker
- * Handles tab management, communication bridges, and download requests.
+ * Handles tab management, communication bridges, and relaying discovery results.
  */
 
 import { ExtensionMessage, WhatsAppSessionStatus } from '../types/messaging';
 
 console.log('[WA Exporter] Background Service Worker initialized');
 
-// When user installs or updates extension
 chrome.runtime.onInstalled.addListener((details) => {
   console.log(`[WA Exporter] Extension installed: reason=${details.reason}`);
 });
@@ -16,10 +15,15 @@ chrome.runtime.onInstalled.addListener((details) => {
 async function findWhatsAppTab(): Promise<chrome.tabs.Tab | undefined> {
   const tabs = await chrome.tabs.query({ url: '*://web.whatsapp.com/*' });
   if (!tabs || tabs.length === 0) return undefined;
-  
-  // Prefer active/audible/focused tab if multiple are open
   const activeTab = tabs.find(t => t.active);
   return activeTab || tabs[0];
+}
+
+// Helper to find the dashboard tab
+async function findDashboardTab(): Promise<chrome.tabs.Tab | undefined> {
+  const dashboardUrl = chrome.runtime.getURL('dashboard.html');
+  const tabs = await chrome.tabs.query({});
+  return tabs.find(t => t.url?.startsWith(dashboardUrl));
 }
 
 // Listen to messages from Dashboard or Content Script
@@ -46,7 +50,6 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendRe
             return;
           }
 
-          // Query content script on the WhatsApp tab
           try {
             const response = await chrome.tabs.sendMessage(waTab.id, {
               action: 'CHECK_WHATSAPP_STATUS',
@@ -59,7 +62,6 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendRe
               pageReady: true,
             }});
           } catch {
-            // Tab is open but content script might still be loading or needs reload
             sendResponse({
               success: true,
               status: {
@@ -101,7 +103,7 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendRe
           break;
         }
 
-        // Forward chat discovery or extraction commands to WhatsApp tab
+        // Forward chat discovery commands to WhatsApp tab's content script
         case 'START_CHAT_DISCOVERY':
         case 'STOP_CHAT_DISCOVERY':
         case 'EXTRACT_CHAT_REQUEST': {
@@ -110,8 +112,33 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendRe
             sendResponse({ success: false, error: 'WhatsApp Web tab not found. Please open WhatsApp Web first.' });
             return;
           }
-          const forwardResponse = await chrome.tabs.sendMessage(waTab.id, message);
-          sendResponse(forwardResponse);
+          try {
+            const forwardResponse = await chrome.tabs.sendMessage(waTab.id, message);
+            sendResponse(forwardResponse);
+          } catch (err) {
+            sendResponse({
+              success: false,
+              error: 'Could not communicate with WhatsApp Web tab. Try refreshing the WhatsApp Web page.',
+            });
+          }
+          break;
+        }
+
+        // Relay discovery results from content script → dashboard
+        case 'CHAT_DISCOVERED':
+        case 'DISCOVERY_PROGRESS':
+        case 'DISCOVERY_COMPLETED': {
+          // This message came from the content script (sender.tab is set).
+          // Forward it to the dashboard tab.
+          const dashTab = await findDashboardTab();
+          if (dashTab && dashTab.id) {
+            try {
+              await chrome.tabs.sendMessage(dashTab.id, message);
+            } catch {
+              console.warn('[WA Exporter] Could not forward discovery results to dashboard');
+            }
+          }
+          sendResponse({ success: true });
           break;
         }
 
@@ -125,6 +152,5 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendRe
     }
   })();
 
-  // Return true to indicate asynchronous sendResponse
   return true;
 });

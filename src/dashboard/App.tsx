@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { 
   ChatContact, 
   ChatExportStatus, 
@@ -60,6 +60,9 @@ export const App: React.FC = () => {
   // Timer & ETA tracking
   const [processStartTime, setProcessStartTime] = useState<number | null>(null);
 
+  // Ref to track scanning state inside the message listener callback
+  const isScanningRef = useRef(false);
+
   // Detect whether running in compact popup or full browser tab
   const [isPopupView] = useState(() => {
     return window.innerWidth < 800 || window.location.search.includes('view=popup');
@@ -88,7 +91,6 @@ export const App: React.FC = () => {
           }
         );
       } else {
-        // Fallback for standalone/mock testing environment
         setSessionStatus({
           isWhatsAppOpen: false,
           isAuthenticated: false,
@@ -132,7 +134,67 @@ export const App: React.FC = () => {
     setLogs(recent);
   }, []);
 
-  // Initial load
+  /**
+   * Handle incoming CHAT_DISCOVERED messages from the content script (relayed by background SW).
+   * Converts discovered chat data into ChatContact records and saves to IndexedDB.
+   */
+  const handleDiscoveredChats = useCallback(async (payload: {
+    chats: Array<{
+      chatId: string;
+      name: string;
+      phoneNumber?: string;
+      chatType: 'individual' | 'group' | 'unknown';
+      lastMessagePreview?: string;
+      lastMessageTimestamp?: string;
+      unreadCount?: number;
+      isBusiness?: boolean;
+    }>;
+    totalSoFar: number;
+    done: boolean;
+  }) => {
+    const { chats: incoming, totalSoFar, done } = payload;
+
+    if (incoming && incoming.length > 0) {
+      const contacts: ChatContact[] = incoming.map(c => ({
+        chatId: c.chatId,
+        name: c.name,
+        phoneNumber: c.phoneNumber,
+        chatType: c.chatType === 'unknown' ? 'individual' : c.chatType,
+        isBusiness: c.isBusiness,
+        isSavedContact: c.phoneNumber ? undefined : undefined,
+        lastMessageTimestamp: c.lastMessageTimestamp,
+        lastMessagePreview: c.lastMessagePreview,
+        unreadCount: c.unreadCount,
+        status: 'discovered' as const,
+        extractedMessagesCount: 0,
+        extractedMediaCount: 0,
+        isSelected: false,
+        discoveredAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      }));
+
+      await chatRepository.upsertChats(contacts);
+      await logRepository.addLog(
+        'success',
+        `Discovered ${incoming.length} new chats (${totalSoFar} total so far)`
+      );
+    }
+
+    if (done) {
+      setIsScanning(false);
+      isScanningRef.current = false;
+      setCurrentProcessStatus('idle');
+      await logRepository.addLog(
+        'success',
+        `Chat discovery completed. Total unique chats found: ${totalSoFar}`
+      );
+    }
+
+    await refreshData();
+    await refreshLogs();
+  }, [refreshData, refreshLogs]);
+
+  // Initial load & chrome message listener
   useEffect(() => {
     const init = async () => {
       const [savedSettings, consent] = await Promise.all([
@@ -145,10 +207,46 @@ export const App: React.FC = () => {
     };
     init();
 
-    // Check status every 10 seconds
+    // Check WhatsApp status every 10 seconds
     const interval = setInterval(checkStatus, 10000);
-    return () => clearInterval(interval);
-  }, [checkStatus, refreshData, refreshLogs]);
+
+    // Listen for CHAT_DISCOVERED messages forwarded by the background service worker
+    const messageListener = (
+      message: { action: string; payload?: unknown },
+      _sender: chrome.runtime.MessageSender,
+      sendResponse: (response?: unknown) => void
+    ) => {
+      if (message.action === 'CHAT_DISCOVERED' && message.payload) {
+        handleDiscoveredChats(message.payload as {
+          chats: Array<{
+            chatId: string;
+            name: string;
+            phoneNumber?: string;
+            chatType: 'individual' | 'group' | 'unknown';
+            lastMessagePreview?: string;
+            lastMessageTimestamp?: string;
+            unreadCount?: number;
+            isBusiness?: boolean;
+          }>;
+          totalSoFar: number;
+          done: boolean;
+        });
+        sendResponse({ received: true });
+      }
+      return true;
+    };
+
+    if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
+      chrome.runtime.onMessage.addListener(messageListener);
+    }
+
+    return () => {
+      clearInterval(interval);
+      if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
+        chrome.runtime.onMessage.removeListener(messageListener);
+      }
+    };
+  }, [checkStatus, refreshData, refreshLogs, handleDiscoveredChats]);
 
   // Handle consent acceptance
   const handleAcceptConsent = async () => {
@@ -192,31 +290,32 @@ export const App: React.FC = () => {
   // Scanning trigger
   const handleScanChats = async () => {
     setIsScanning(true);
+    isScanningRef.current = true;
     setCurrentProcessStatus('scanning');
-    await logRepository.addLog('info', 'Chat scanning initiated');
+    await logRepository.addLog('info', 'Chat scanning initiated — scrolling through WhatsApp Web chat list...');
     await refreshLogs();
 
     if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
       chrome.runtime.sendMessage(
         { action: 'START_CHAT_DISCOVERY', timestamp: Date.now() },
         async (response) => {
-          setIsScanning(false);
-          setCurrentProcessStatus('idle');
           if (response?.error) {
-            await logRepository.addLog('warn', `Discovery notice: ${response.error}`);
-          } else {
-            await logRepository.addLog('success', 'Discovery request sent to WhatsApp Web');
+            setIsScanning(false);
+            isScanningRef.current = false;
+            setCurrentProcessStatus('idle');
+            await logRepository.addLog('error', `Discovery failed: ${response.error}`);
+            await refreshData();
+            await refreshLogs();
           }
-          await refreshData();
-          await refreshLogs();
+          // If success, scanning continues — results arrive via CHAT_DISCOVERED messages
         }
       );
     } else {
-      // Offline / dev fallback
       setTimeout(async () => {
         setIsScanning(false);
+        isScanningRef.current = false;
         setCurrentProcessStatus('idle');
-        await logRepository.addLog('info', 'Scan finished (Phase 1 preview mode)');
+        await logRepository.addLog('info', 'Scan finished (dev preview mode — no WhatsApp Web tab)');
         await refreshLogs();
       }, 1000);
     }
@@ -261,7 +360,15 @@ export const App: React.FC = () => {
   const handleStop = async () => {
     setCurrentProcessStatus('idle');
     setProcessStartTime(null);
-    await logRepository.addLog('warn', 'Bulk export stopped by user');
+    // Also stop discovery if it's running
+    if (isScanningRef.current) {
+      if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+        chrome.runtime.sendMessage({ action: 'STOP_CHAT_DISCOVERY', timestamp: Date.now() });
+      }
+      setIsScanning(false);
+      isScanningRef.current = false;
+    }
+    await logRepository.addLog('warn', 'Export/scan stopped by user');
     await refreshLogs();
   };
 
@@ -273,9 +380,8 @@ export const App: React.FC = () => {
   };
 
   const handleDownloadExport = async () => {
-    await logRepository.addLog('info', 'Download Export triggered');
+    await logRepository.addLog('info', 'Download Export triggered — export packaging will be available in Phase 5');
     await refreshLogs();
-    alert('Export packaging ready. Once extraction runs in Phase 5, this creates the ZIP archive matching Section 7 specifications.');
   };
 
   const handleClearDataConfirm = async () => {
@@ -325,7 +431,7 @@ export const App: React.FC = () => {
           progressPercent={progressPercent}
           estimatedRemainingTime={eta.formatted}
           processingSpeed={eta.speedPerSec}
-          totalExportSizeBytes={stats.totalMedia * 150000} // estimated bytes from media
+          totalExportSizeBytes={stats.totalMedia * 150000}
         />
 
         {/* Action Toolbar */}
