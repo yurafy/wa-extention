@@ -30,9 +30,31 @@
         "https://web.whatsapp.com/*"
       ],
       "js": [
+        "bridge.js"
+      ],
+      "world": "MAIN",
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://web.whatsapp.com/*"
+      ],
+      "js": [
         "content.js"
       ],
+      "world": "ISOLATED",
       "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "bridge.js",
+        "icons/*"
+      ],
+      "matches": [
+        "https://web.whatsapp.com/*"
+      ]
     }
   ],
   "icons": {

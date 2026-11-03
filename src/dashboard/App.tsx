@@ -11,6 +11,8 @@ import { settingsRepository } from '../storage/settingsRepository';
 import { logRepository } from '../storage/logRepository';
 import { DEFAULT_SETTINGS } from '../storage/db';
 import { calculateEstimatedRemainingTime } from '../utils/formatters';
+import { bulkExporter } from '../services/bulkExporter';
+import { exportService } from '../services/exportService';
 
 import { Header } from './components/Header';
 import { StatsOverview } from './components/StatsOverview';
@@ -324,43 +326,76 @@ export const App: React.FC = () => {
   // Export process control handlers
   const handleExportAll = async () => {
     await chatRepository.setAllChatsSelection(true);
-    await refreshData();
+    const { chats: allChats } = await chatRepository.listChats();
+    if (allChats.length === 0) {
+      alert('Please scan chats first before exporting.');
+      return;
+    }
     setProcessStartTime(Date.now());
     setCurrentProcessStatus('running');
-    await logRepository.addLog('info', 'Bulk export initiated for all discovered chats');
+    await logRepository.addLog('info', `Bulk export initiated for all ${allChats.length} discovered chats`);
     await refreshLogs();
+
+    bulkExporter.startExport(allChats, async (_processed, _total, state) => {
+      if (state === 'idle' || state === 'stopped') {
+        setCurrentProcessStatus('idle');
+      } else if (state === 'paused') {
+        setCurrentProcessStatus('paused');
+      }
+      await refreshData();
+    });
   };
 
   const handleExportSelected = async () => {
+    const { chats: selectedChats } = await chatRepository.listChats({ onlySelected: true });
+    if (selectedChats.length === 0) {
+      alert('Please select at least one chat using the checkboxes to export.');
+      return;
+    }
     setProcessStartTime(Date.now());
     setCurrentProcessStatus('running');
-    await logRepository.addLog('info', `Bulk export initiated for ${stats.selected} selected chats`);
+    await logRepository.addLog('info', `Bulk export initiated for ${selectedChats.length} selected chats`);
     await refreshLogs();
+
+    bulkExporter.startExport(selectedChats, async (_processed, _total, state) => {
+      if (state === 'idle' || state === 'stopped') {
+        setCurrentProcessStatus('idle');
+      } else if (state === 'paused') {
+        setCurrentProcessStatus('paused');
+      }
+      await refreshData();
+    });
   };
 
   const handleExportSingle = async (chatId: string) => {
-    await chatRepository.updateChatStatus(chatId, 'queued');
+    const chat = chats.find(c => c.chatId === chatId);
+    if (!chat) return;
+    setCurrentProcessStatus('running');
+    await logRepository.addLog('info', `Extracting single conversation "${chat.name}"...`, chatId);
+    await bulkExporter.extractSingleChat(chat);
+    setCurrentProcessStatus('idle');
     await refreshData();
-    await logRepository.addLog('info', `Conversation ${chatId} queued for export`, chatId);
     await refreshLogs();
   };
 
   const handlePause = async () => {
+    bulkExporter.pause();
     setCurrentProcessStatus('paused');
     await logRepository.addLog('info', 'Bulk export paused by user');
     await refreshLogs();
   };
 
   const handleResume = async () => {
+    bulkExporter.resume();
     setCurrentProcessStatus('running');
     await logRepository.addLog('info', 'Bulk export resumed by user');
     await refreshLogs();
   };
 
   const handleStop = async () => {
+    bulkExporter.stop();
     setCurrentProcessStatus('idle');
     setProcessStartTime(null);
-    // Also stop discovery if it's running
     if (isScanningRef.current) {
       if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
         chrome.runtime.sendMessage({ action: 'STOP_CHAT_DISCOVERY', timestamp: Date.now() });
@@ -380,7 +415,23 @@ export const App: React.FC = () => {
   };
 
   const handleDownloadExport = async () => {
-    await logRepository.addLog('info', 'Download Export triggered — export packaging will be available in Phase 5');
+    await logRepository.addLog('info', 'Building ZIP package according to Section 7 folder structure...');
+    await refreshLogs();
+    try {
+      const result = await exportService.buildAndDownloadZip(false);
+      if (result.success) {
+        await logRepository.addLog(
+          'success',
+          `Downloaded ${result.totalZips} ZIP archive(s) with ${result.totalContacts} contacts, ${result.totalMessages} messages, and ${result.totalMedia} media files!`
+        );
+      } else {
+        await logRepository.addLog('warn', result.error || 'Failed to generate ZIP');
+        alert(result.error || 'Failed to generate ZIP. Please ensure chats have been scanned first.');
+      }
+    } catch (err: any) {
+      await logRepository.addLog('error', `Error building ZIP: ${err?.message || err}`);
+      alert(`Error building ZIP: ${err?.message || err}`);
+    }
     await refreshLogs();
   };
 
