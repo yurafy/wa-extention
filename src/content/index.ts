@@ -8,7 +8,9 @@ import { discoverAllChats, stopDiscovery, DiscoveredChat } from './chatDiscovery
 import { 
   openConversationInDOM, 
   resolveOpenChatPhoneNumber, 
-  extractMessagesFromOpenChat 
+  extractMessagesFromOpenChat,
+  abortActiveExtraction,
+  resetActiveExtraction
 } from './chatExtractor';
 
 console.log('[WA Exporter] Content script loaded on WhatsApp Web');
@@ -92,7 +94,14 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendRe
       break;
     }
 
+    case 'STOP_EXTRACTION': {
+      abortActiveExtraction();
+      sendResponse({ success: true, message: 'Extraction aborted' });
+      break;
+    }
+
     case 'EXTRACT_CHAT_REQUEST': {
+      resetActiveExtraction();
       // Direct DOM extraction
       (async () => {
         try {

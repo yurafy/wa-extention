@@ -118,12 +118,15 @@ export const chatRepository = {
   async setAllChatsSelection(isSelected: boolean, chatType?: 'individual' | 'group'): Promise<void> {
     await db.transaction('rw', db.chats, async () => {
       let chats = await db.chats.toArray();
-      if (chatType) {
+      if (chatType && chatType !== ('all' as any)) {
         chats = chats.filter(c => c.chatType === chatType);
       }
-      for (const chat of chats) {
-        await db.chats.update(chat.chatId, { isSelected });
-      }
+      const updated = chats.map(c => ({
+        ...c,
+        isSelected,
+        updatedAt: new Date().toISOString(),
+      }));
+      await db.chats.bulkPut(updated);
     });
   },
 

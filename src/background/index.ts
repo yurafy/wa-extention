@@ -106,6 +106,7 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendRe
         // Forward chat discovery commands to WhatsApp tab's content script
         case 'START_CHAT_DISCOVERY':
         case 'STOP_CHAT_DISCOVERY':
+        case 'STOP_EXTRACTION':
         case 'EXTRACT_CHAT_REQUEST': {
           const waTab = await findWhatsAppTab();
           if (!waTab || !waTab.id) {

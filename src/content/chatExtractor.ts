@@ -3,6 +3,16 @@
  * Directly controls WhatsApp Web DOM without relying on external bridges or postMessage.
  */
 
+let isExtractionAborted = false;
+
+export function abortActiveExtraction(): void {
+  isExtractionAborted = true;
+}
+
+export function resetActiveExtraction(): void {
+  isExtractionAborted = false;
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -141,6 +151,8 @@ export async function openConversationInDOM(
   const maxRounds = 50;
 
   for (let r = 0; r < maxRounds; r++) {
+    if (isExtractionAborted) return false;
+
     const rows = document.querySelectorAll(
       '#pane-side [data-testid="cell-frame-container"], #pane-side div[role="listitem"]'
     );
@@ -252,6 +264,7 @@ export async function extractMessagesFromOpenChat(): Promise<{
 
   if (msgPanel) {
     for (let r = 0; r < 8; r++) {
+      if (isExtractionAborted) break;
       const prevHeight = msgPanel.scrollHeight;
       msgPanel.scrollTop = 0;
       await sleep(400);

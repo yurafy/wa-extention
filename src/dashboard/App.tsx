@@ -258,20 +258,32 @@ export const App: React.FC = () => {
     await refreshLogs();
   };
 
-  // Selection handlers
-  const handleToggleSelect = async (chatId: string) => {
+  // Selection handlers: optimistic immediate UI updates for zero lag
+  const handleToggleSelect = (chatId: string) => {
     const chat = chats.find(c => c.chatId === chatId);
     if (!chat) return;
-    await chatRepository.setChatSelection(chatId, !chat.isSelected);
-    await refreshData();
+    const newSelected = !chat.isSelected;
+
+    setChats(prev => prev.map(c => c.chatId === chatId ? { ...c, isSelected: newSelected } : c));
+    setStats(prev => ({
+      ...prev,
+      selected: newSelected ? prev.selected + 1 : Math.max(0, prev.selected - 1),
+    }));
+
+    chatRepository.setChatSelection(chatId, newSelected);
   };
 
-  const handleSelectAll = async (selected: boolean) => {
-    await chatRepository.setAllChatsSelection(
+  const handleSelectAll = (selected: boolean) => {
+    setChats(prev => prev.map(c => ({ ...c, isSelected: selected })));
+    setStats(prev => ({
+      ...prev,
+      selected: selected ? prev.totalDiscovered : 0,
+    }));
+
+    chatRepository.setAllChatsSelection(
       selected, 
       selectedChatType === 'all' ? undefined : selectedChatType
     );
-    await refreshData();
   };
 
   // Tab navigation actions
@@ -381,14 +393,14 @@ export const App: React.FC = () => {
   const handlePause = async () => {
     bulkExporter.pause();
     setCurrentProcessStatus('paused');
-    await logRepository.addLog('info', 'Bulk export paused by user');
+    await logRepository.addLog('info', 'Bulk export paused');
     await refreshLogs();
   };
 
   const handleResume = async () => {
     bulkExporter.resume();
     setCurrentProcessStatus('running');
-    await logRepository.addLog('info', 'Bulk export resumed by user');
+    await logRepository.addLog('info', 'Bulk export resumed');
     await refreshLogs();
   };
 
@@ -396,15 +408,15 @@ export const App: React.FC = () => {
     bulkExporter.stop();
     setCurrentProcessStatus('idle');
     setProcessStartTime(null);
-    if (isScanningRef.current) {
-      if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
-        chrome.runtime.sendMessage({ action: 'STOP_CHAT_DISCOVERY', timestamp: Date.now() });
-      }
-      setIsScanning(false);
-      isScanningRef.current = false;
+    setIsScanning(false);
+    isScanningRef.current = false;
+    if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+      chrome.runtime.sendMessage({ action: 'STOP_EXTRACTION', timestamp: Date.now() });
+      chrome.runtime.sendMessage({ action: 'STOP_CHAT_DISCOVERY', timestamp: Date.now() });
     }
-    await logRepository.addLog('warn', 'Export/scan stopped by user');
+    await logRepository.addLog('warn', 'Extraction/scan stopped immediately');
     await refreshLogs();
+    await refreshData();
   };
 
   const handleRetryFailed = async () => {

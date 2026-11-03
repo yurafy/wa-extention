@@ -18,6 +18,7 @@ export type MessageAction =
   | 'EXTRACT_CHAT_REQUEST'
   | 'EXTRACT_CHAT_PROGRESS'
   | 'EXTRACT_CHAT_RESULT'
+  | 'STOP_EXTRACTION'
   // Export Control
   | 'START_BULK_EXPORT'
   | 'PAUSE_EXPORT'
